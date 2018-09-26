@@ -1,0 +1,555 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Stack
+Parameters:
+  
+  InstanceType:
+    ConstraintDescription: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+    - t2.micro
+    - t2.small
+    - t2.medium
+    Description: Select Environment Size
+  RDSInstanceType:
+    Description: RDS instance type
+    Type: String
+    Default: db.t2.small
+    AllowedValues:
+    - db.t2.small
+    - db.t2.medium
+    - db.r3.large
+    - db.r3.xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  SSLCertificateCloudFront:
+    Description: ACM Certificate ARN for the CloudFront Distribution (Region USEast1)
+    Type: String
+    AllowedPattern: "arn:aws:acm:.*"
+  ImageId:
+    Description: AWS AMI ImageId
+    Type: String
+    Default: ami-8267abe0
+  DBName:
+    Default: MYRDS
+    Description: The database name
+    Type: String
+    MinLength: '1'
+    MaxLength: '64'
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBUser:
+    Default: Vijesh
+    Description: The database admin account username
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBPassword:
+    NoEcho: 'true'
+    Description: The database admin account password
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: "[a-zA-Z0-9]*"
+    ConstraintDescription: must contain only alphanumeric characters.
+  ASGDesiredCapacity:
+    Description: The desired capacity for the Auto Scaling group
+    Default: '2'
+    Type: Number
+  ASGMinSize:
+    Description: The minimum size of the Auto Scaling group.
+    Type: Number
+    Default: '2'
+  ASGMaxSize:
+    Description: The maximum size of the Auto Scaling group.
+    Type: Number
+    Default: '10'
+Resources:
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: 'true'
+      EnableDnsHostnames: 'true'
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: VPC
+      InternetGatewayId:
+        Ref: InternetGateway  
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.1.0/24
+  PrivateSubnetAZ1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.10.0/24
+  PrivateSubnetAZ2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.20.0/24
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  PublicInternetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTable
+      GatewayId:
+        Ref: InternetGateway
+      DestinationCidrBlock: 0.0.0.0/0
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PublicRouteTable
+      SubnetId:
+        Ref: PublicSubnet
+  PrivateRouteTableAZ1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  PrivateRouteTableAZ2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: VPC
+  PrivateSubnetRouteTableAssociationAZ1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTableAZ1
+      SubnetId:
+        Ref: PrivateSubnetAZ1
+  PrivateSubnetRouteTableAssociationAZ2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTableAZ2
+      SubnetId:
+        Ref: PrivateSubnetAZ2
+  PrivateInternetRouteAZ1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTableAZ1
+      NatGatewayId:
+        Ref: NATGateway
+      DestinationCidrBlock: 0.0.0.0/0
+  PrivateInternetRouteAZ2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId:
+        Ref: PrivateRouteTableAZ2
+      NatGatewayId:
+        Ref: NATGateway
+      DestinationCidrBlock: 0.0.0.0/0
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: VPC
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+        - ElasticIP
+        - AllocationId
+      SubnetId:
+        Ref: PublicSubnet
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Load Balancer security group
+      VpcId:
+        Ref: VPC
+      Tags:
+      - Key: Protocol
+        Value: https
+      - Key: AutoUpdate
+        Value: 'true'
+  LoadBalancerIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: '443'
+      ToPort: '443'
+      CidrIp: 0.0.0.0/0
+      GroupId:
+        Fn::GetAtt:
+        - LoadBalancerSecurityGroup
+        - GroupId
+  LoadBalancerEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: '80'
+      ToPort: '80'
+      DestinationSecurityGroupId:
+        Fn::GetAtt:
+        - InstanceSecurityGroup
+        - GroupId
+      GroupId:
+        Fn::GetAtt:
+        - LoadBalancerSecurityGroup
+        - GroupId
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP from the load balancer only
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        SourceSecurityGroupId:
+          Fn::GetAtt:
+          - LoadBalancerSecurityGroup
+          - GroupId
+      VpcId:
+        Ref: VPC
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Database access from ec2 instances
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '3306'
+        ToPort: '3306'
+        SourceSecurityGroupId:
+          Fn::GetAtt:
+          - InstanceSecurityGroup
+          - GroupId
+      VpcId:
+        Ref: VPC
+  EC2Permissions:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies: 
+        - 
+          PolicyName: "root"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: "Allow"
+                Action: "*"
+                Resource: "*"
+  IamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: EC2Permissions
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: DB subnet group
+      SubnetIds:
+      - Ref: PrivateSubnetAZ1
+      - Ref: PrivateSubnetAZ2
+  #LoyaltyCorpNetworkAclEntry:
+  #  Type: AWS::EC2::NetworkAclEntry
+  #  Properties:
+  #    NetworkAclId:
+  #      Ref: LCNetworkAcl
+  #    RuleNumber: '100'
+  #    Protocol: "-1"
+  #    RuleAction: allow
+  #    Egress: 'true'
+  #    CidrBlock: 115.70.204.73/32
+  #    Icmp:
+  #      Code: "-1"
+  #      Type: "-1"
+  #    PortRange:
+  #      From: '22'
+  #      To: '22'
+  #LCNetworkAcl:
+  #  Type: AWS::EC2::NetworkAcl
+  #  Properties:
+  #    VpcId:
+  #      Ref: VPC
+  #LCNetworkACLAssociation:
+  #  Type: AWS::EC2::SubnetNetworkAclAssociation
+  #  Properties:
+  #    SubnetId:
+  #      Ref: PublicSubnet
+  #    NetworkAclId:
+  #      Ref: LCNetworkAcl
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      EnableKeyRotation: 'true'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: Enable IAM User Permissions
+          Effect: Allow
+          Principal:
+            AWS:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:iam::'
+                - Ref: AWS::AccountId
+                - ":root"
+          Action: kms:*
+          Resource: "*"
+  KMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/KMSKeyAlias
+      TargetKeyId:
+        Ref: KMSKey
+  RDSCluster:
+    Type: AWS::RDS::DBCluster
+    DependsOn:
+    - DBSecurityGroup
+    - DBSubnetGroup
+    Properties:
+      DatabaseName:
+        Ref: DBName
+      MasterUsername: 
+        Ref: DBUser
+      MasterUserPassword: 
+        Ref: DBPassword
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+      VpcSecurityGroupIds:
+      - Fn::GetAtt:
+        - DBSecurityGroup
+        - GroupId
+      Engine: aurora
+      BackupRetentionPeriod: 10
+      StorageEncrypted: true
+      KmsKeyId:
+        Ref: KMSKeyAlias
+    DeletionPolicy: Snapshot
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DependsOn:
+    - DBSubnetGroup
+    - RDSCluster
+    Properties:
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+      DBClusterIdentifier:
+        Ref: RDSCluster
+      DBInstanceClass:
+        Ref: RDSInstanceType
+      Engine: aurora
+      PubliclyAccessible: 'false'
+  ASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones:
+        Fn::GetAZs: ''
+      VPCZoneIdentifier:
+        Ref: PublicSubnet
+      DesiredCapacity:
+        Ref: ASGDesiredCapacity
+      LoadBalancerNames:
+      - Ref: ELB
+      LaunchConfigurationName:
+        Ref: LaunchConfig
+      MinSize: 1
+      MaxSize: 3
+      NotificationConfiguration:
+        TopicARN: arn:aws:sns:us-east-1:725021207524:CloudformationNotifications
+        NotificationTypes:
+        - autoscaling:EC2_INSTANCE_LAUNCH
+        - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+        - autoscaling:EC2_INSTANCE_TERMINATE
+        - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      MetricsCollection:
+      - Granularity: 1Minute
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+        Count: '1'
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: '1'
+        MaxBatchSize: '1'
+        PauseTime: PT15M
+        WaitOnResourceSignals: 'true'
+  ELB:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: 'true'
+      Listeners:
+      - LoadBalancerPort: '80'
+        InstancePort: '80'
+        Protocol: HTTP
+      HealthCheck:
+        Target: TCP:80
+        HealthyThreshold: '3'
+        UnhealthyThreshold: '2'
+        Interval: '30'
+        Timeout: '5'
+      ConnectionDrainingPolicy:
+        Enabled: 'true'
+        Timeout: '60'
+      SecurityGroups:
+      - Ref: LoadBalancerSecurityGroup
+      Subnets:
+      - Ref: PublicSubnet
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          bootstrap:
+          - Verify healthy instance from ELB
+        Verify healthy instance from ELB:
+          commands:
+            ELBHealthCheck:
+              command:
+                Fn::Join:
+                - ''
+                - - 'until [ "$state" == "\"InService\"" ]; do '
+                  - "  state=$(aws --region "
+                  - Ref: AWS::Region
+                  - " elb describe-instance-health "
+                  - "              --load-balancer-name "
+                  - Ref: ELB
+                  - "              --instances $(curl -s http://169.254.169.254/latest/meta-data/instance-id) "
+                  - "              --query InstanceStates[0].State); "
+                  - "  sleep 10; "
+                  - done
+    Properties:
+      ImageId:
+        Ref: ImageId
+      InstanceMonitoring: 'false'
+      InstanceType:
+        Ref: InstanceType
+      KeyName:
+        Ref: KeyName
+      SecurityGroups:
+      - Ref: InstanceSecurityGroup
+      IamInstanceProfile:
+        Ref: IamInstanceProfile
+      UserData:
+        "Fn::Base64":
+            #!/bin/bash
+            yum install httpd php mysql php-mysql -y
+            yum update -y
+            chkconfig httpd on
+            service httpd start
+  ScaleUpPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+       Ref: ASG
+      Cooldown: '60'
+      ScalingAdjustment: '1'
+  ScaleDownPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName:
+        Ref: ASG
+      Cooldown: '60'
+      ScalingAdjustment: "-1"
+  CPUAlarm:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmDescription: CPU more than 70% for 
+        MetricName: CPUUtilization
+        Namespace: AWS/EC2
+        EvaluationPeriods: 1
+        Period: 60
+        Threshold: 70
+        ActionsEnabled: true|false
+        AlarmActions:
+         - Ref: ScaleUpPolicy      
+        AlarmName: CPU Utilization above 70%
+        Dimensions:
+         - Name: AutoScalingGroupName
+        Value:
+          Ref: ASG
+        ComparisonOperator: GreaterThanThreshold
+  #SNSTopic:
+  #  Type: AWS::SNS::Topic
+  #  Properties:
+  #    DisplayName: 
+  #    Subscription: 
+  #    TopicName: CPU Utilization above 70% please update
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: S3AppBucket
+    Properties:
+      DistributionConfig:
+        Comment: Cloudfront Distribution pointing to S3 bucket
+        Origins:
+        - DomainName: S3AppBucket.s3.amazonaws.com
+          Id: S3Origin
+          CustomOriginConfig:
+            HTTPPort: '80'
+            HTTPSPort: '443'
+            OriginAccessIdentity: origin-access-identity/cloudfront/E127EXAMPLE51Z
+            DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          TargetOriginId: S3AppBucket
+          DefaultTTL: '0'
+          ViewerProtocolPolicy: redirect-to-https  #if user submits http req - the request gets redirected to https, becuase it returns a http status code of 301-permanent url redirection to https
+        ViewerCertificate:
+          AcmCertificateArn:
+            Ref: SSLCertificateCF
+          MinimumProtocolVersion: TLSv1
+          SslSupportMethod: sni-only
+  S3AppBucket:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      WebsiteConfiguration:
+        ErrorDocument: error.html
+        IndexDocument: index.html
+  S3AppBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: S3AppBucket
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            AWS: arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity E127EXAMPLE51Z
+          Action: s3:GetObject
+          Resource: "arn:aws:s3:::S3AppBucket/*"
